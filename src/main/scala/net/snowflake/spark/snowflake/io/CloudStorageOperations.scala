@@ -563,6 +563,9 @@ sealed trait CloudStorage {
                                 fileTransferMetadata: Option[SnowflakeFileTransferMetadata]
                                )
   : SingleElementIterator = {
+    // Log system configuration if not yet.
+    SnowflakeResultSetRDD.executorLogSystemConfigIfNotYet()
+
     val fileName = getFileName(partitionID, format, compress)
 
     // Either StorageInfo or fileTransferMetadata must be set.
@@ -583,6 +586,8 @@ sealed trait CloudStorage {
 
         // Send OOB telemetry message if uploading failure happens
         val attemptNumber = TaskContext.get().attemptNumber()
+        val config = SnowflakeTelemetry.getSystemConfig()
+        SnowflakeTelemetry.addTaskInfo(config)
         SnowflakeTelemetry.sendTelemetryOOB(
           sfURL,
           this.getClass.getSimpleName,
@@ -592,7 +597,8 @@ sealed trait CloudStorage {
           false,
           proxyInfo.isDefined,
           None,
-          Some(new Exception(e)))
+          Some(new Exception(e)),
+          Some(config))
 
         // Sleep exponential time based on the attempt number.
         if (useExponentialBackoff) {
@@ -639,6 +645,7 @@ sealed trait CloudStorage {
     CloudStorageOperations.log.info(
       s"""${SnowflakeResultSetRDD.WORKER_LOG_PREFIX}:
          | Start writing partition ID:$partitionID as $fileName
+         | TaskInfo: ${SnowflakeTelemetry.getTaskInfo().toPrettyString}
          |""".stripMargin.filter(_ >= ' '))
 
     // Read data and upload to cloud storage
@@ -844,6 +851,8 @@ sealed trait CloudStorage {
 
     // Send OOB telemetry message if downloading failure happens
     if (retryCount > 0) {
+      val config = SnowflakeTelemetry.getSystemConfig()
+      SnowflakeTelemetry.addTaskInfo(config)
       SnowflakeTelemetry.sendTelemetryOOB(
         sfURL,
         this.getClass.getSimpleName,
@@ -853,7 +862,8 @@ sealed trait CloudStorage {
         downloadDone,
         proxyInfo.isDefined,
         None,
-        error)
+        error,
+        Some(config))
     }
 
     if (downloadDone) {

@@ -11,6 +11,7 @@ import net.snowflake.client.jdbc.internal.fasterxml.jackson.databind.node.Object
 import net.snowflake.client.jdbc.telemetryOOB.{TelemetryEvent, TelemetryService}
 import net.snowflake.spark.snowflake.DefaultJDBCWrapper.DataBaseOperations
 import net.snowflake.spark.snowflake.TelemetryTypes.TelemetryTypes
+import org.apache.spark.{SparkEnv, TaskContext}
 
 object SnowflakeTelemetry {
 
@@ -22,6 +23,7 @@ object SnowflakeTelemetry {
   private val mapper = new ObjectMapper()
 
   private var hasClientInfoSent = false
+  private[snowflake] val MB = 1024 * 1024
 
   private[snowflake] var output: ObjectNode = _
 
@@ -82,7 +84,8 @@ object SnowflakeTelemetry {
                        success: Boolean,
                        useProxy: Boolean,
                        queryID: Option[String],
-                       exception: Option[Exception]): Unit =
+                       exception: Option[Exception],
+                       config: Option[ObjectNode]): Unit =
   {
     val metric: ObjectNode = mapper.createObjectNode()
     metric.put(TelemetryOOBFields.SPARK_CONNECTOR_VERSION, Utils.VERSION)
@@ -104,6 +107,9 @@ object SnowflakeTelemetry {
       metric.put(TelemetryOOBFields.EXCEPTION_CLASS_NAME, "NA")
       metric.put(TelemetryOOBFields.EXCEPTION_MESSAGE, "NA")
       metric.put(TelemetryOOBFields.EXCEPTION_STACKTRACE, "NA")
+    }
+    if (config.isDefined) {
+      metric.set(TelemetryOOBFields.CONFIG, config.get)
     }
 
     // The constructor of TelemetryEvent.LogBuilder uses
@@ -188,6 +194,52 @@ object SnowflakeTelemetry {
     )
   }
 
+  private[snowflake] def getSystemConfig(): ObjectNode = {
+    val metric: ObjectNode = mapper.createObjectNode()
+    addSystemConfig(metric)
+    // Add versions
+    Utils.addClientInfoJson(metric)
+  }
+
+  private[snowflake] def addSystemConfig(metric: ObjectNode): ObjectNode = {
+    // System basic information
+    metric.put(TelemetryConfigFields.OS_NAME, System.getProperty("os.name"))
+    val rt = Runtime.getRuntime
+    metric.put(TelemetryConfigFields.MAX_MEMORY_IN_MB, rt.maxMemory() / MB)
+    metric.put(TelemetryConfigFields.TOTAL_MEMORY_IN_MB, rt.totalMemory() / MB)
+    metric.put(TelemetryConfigFields.FREE_MEMORY_IN_MB, rt.freeMemory() / MB)
+    metric.put(TelemetryConfigFields.CORES, rt.availableProcessors())
+
+    // Spark configuration may affect spark connector
+    val sparkConf = SparkEnv.get.conf
+    TelemetryConfigFields.AFFECTED_SPARK_OPTIONS.foreach(
+      optionName => {
+        if (sparkConf.contains(optionName)) {
+          metric.put(optionName, sparkConf.get(optionName))
+        }
+      }
+    )
+    metric
+  }
+
+  private[snowflake] def getTaskInfo(): ObjectNode = {
+    val metric: ObjectNode = mapper.createObjectNode()
+    addTaskInfo(metric)
+  }
+
+  private[snowflake] def addTaskInfo(metric: ObjectNode): ObjectNode = {
+    val task = TaskContext.get()
+    if (task != null) {
+      metric.put(TelemetryConfigFields.TASK_PARTITION_ID, task.partitionId())
+      metric.put(TelemetryConfigFields.TASK_ATTEMPT_ID, task.taskAttemptId())
+      metric.put(TelemetryConfigFields.TASK_ATTEMPT_NUMBER, task.attemptNumber())
+      metric.put(TelemetryConfigFields.TASK_STAGE_ATTEMPT_NUMBER, task.stageAttemptNumber())
+      metric.put(TelemetryConfigFields.TASK_STAGE_ID, task.stageId())
+    }
+    metric.put(TelemetryConfigFields.THREAD_ID, Thread.currentThread().getId)
+    metric
+  }
+
 }
 
 object TelemetryTypes extends Enumeration {
@@ -220,6 +272,66 @@ object TelemetryClientInfoFields {
   val SFURL = "sfurl"
 }
 
+object TelemetryConfigFields {
+  // System basic information
+  val OS_NAME = "os.name"
+  val MAX_MEMORY_IN_MB = "max.memory.mb"
+  val TOTAL_MEMORY_IN_MB = "total.memory.mb"
+  val FREE_MEMORY_IN_MB = "free.memory.mb"
+  val CORES = "cores"
+
+  // task information which may be are available on executor.
+  val TASK_PARTITION_ID = "task.partition.id"
+  val TASK_STAGE_ID = "task.stage.id"
+  val TASK_ATTEMPT_ID = "task.attempt.id"
+  val TASK_ATTEMPT_NUMBER = "task.attempt.number"
+  val TASK_STAGE_ATTEMPT_NUMBER = "task.stage.attemp.number"
+  val THREAD_ID = "thread.id"
+
+  // Spark options may affect spark connector.
+  val AFFECTED_SPARK_OPTIONS = Set(
+    "spark.app.name",
+    "spark.app.id",
+    "spark.submit.deployMode",
+    "spark.jars",
+    "spark.master",
+    "spark.repl.local.jars",
+    // Driver related
+    "spark.driver.host",
+    "spark.driver.extraJavaOptions",
+    "spark.driver.extraClassPath",
+    "spark.driver.cores",
+    // Executor related
+    "spark.executor.cores",
+    "spark.executor.instances",
+    "spark.executor.extraJavaOptions",
+    "spark.executor.extraClassPath",
+    "spark.executor.id",
+    // Memory related
+    "spark.driver.memory",
+    "spark.driver.memoryOverhead",
+    "spark.executor.memory",
+    "spark.executor.memoryOverhead",
+    "spark.executor.pyspark.memory",
+    "spark.python.worker.memory",
+    "spark.memory.fraction",
+    "spark.memory.storageFraction",
+    "spark.memory.offHeap.enabled",
+    "spark.memory.offHeap.size",
+    // Execution behavior
+    "spark.default.parallelism",
+    "spark.dynamicAllocation.enabled",
+    "spark.dynamicAllocation.initialExecutors",
+    "spark.dynamicAllocation.maxExecutors",
+    "spark.dynamicAllocation.minExecutors",
+    // Misc
+    "spark.sql.ansi.enabled",
+    "spark.pyspark.driver.python",
+    "spark.pyspark.python",
+    "spark.sql.session.timeZone",
+  )
+}
+
 object TelemetryPushdownFailFields {
   // Spark connector version
   val SPARK_CONNECTOR_VERSION: String = "spark_connector_version"
@@ -245,6 +357,7 @@ object TelemetryOOBFields {
   val SUCCESS: String = "success"
   val USE_PROXY: String = "use_proxy"
   val QUERY_ID: String = "queryid"
+  val CONFIG: String = "config"
   // Below 3 fields are the Exception details.
   val EXCEPTION_CLASS_NAME: String = "exception"
   val EXCEPTION_MESSAGE: String = "message"

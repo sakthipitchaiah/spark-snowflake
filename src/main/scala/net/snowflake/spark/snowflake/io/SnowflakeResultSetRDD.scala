@@ -6,12 +6,7 @@ import java.util.Properties
 import net.snowflake.client.jdbc.{ErrorCode, SnowflakeResultSetSerializable, SnowflakeSQLException}
 import net.snowflake.client.jdbc.internal.fasterxml.jackson.databind.ObjectMapper
 import net.snowflake.spark.snowflake.test.{TestHook, TestHookFlag}
-import net.snowflake.spark.snowflake.{
-  Conversions,
-  ProxyInfo,
-  SnowflakeConnectorException,
-  SnowflakeTelemetry
-}
+import net.snowflake.spark.snowflake.{Conversions, ProxyInfo, SnowflakeConnectorException, SnowflakeTelemetry}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.catalyst.InternalRow
@@ -27,6 +22,16 @@ object SnowflakeResultSetRDD {
   private[snowflake] val logger = LoggerFactory.getLogger(getClass)
   private[snowflake] val MASTER_LOG_PREFIX = "Spark Connector Master"
   private[snowflake] val WORKER_LOG_PREFIX = "Spark Connector Worker"
+  private var doesExecutorSystemConfigLogged = false
+
+  // One executor may execute multiple tasks, it is enough to log once.
+  private[snowflake] def executorLogSystemConfigIfNotYet(): Unit = {
+    if (!doesExecutorSystemConfigLogged) {
+      doesExecutorSystemConfigLogged = true
+      logger.info(s"$WORKER_LOG_PREFIX: system config: " +
+        s"${SnowflakeTelemetry.getSystemConfig().toPrettyString}")
+    }
+  }
 }
 
 class SnowflakeResultSetRDD[T: ClassTag](
@@ -63,6 +68,9 @@ case class ResultIterator[T: ClassTag](
   queryID: String,
   sfFullURL: String
 ) extends Iterator[T] {
+  // Log system configuration once per executor
+  SnowflakeResultSetRDD.executorLogSystemConfigIfNotYet()
+
   val jdbcProperties: Properties = {
     val jdbcProperties = new Properties()
     // Set up proxy info if it is configured.
@@ -80,7 +88,8 @@ case class ResultIterator[T: ClassTag](
       SnowflakeResultSetRDD.logger.info(
         s"""${SnowflakeResultSetRDD.WORKER_LOG_PREFIX}: Start reading
            | partition ID:$partitionIndex expectedRowCount=
-           | $expectedRowCount
+           | $expectedRowCount TaskInfo:
+           | ${SnowflakeTelemetry.getTaskInfo().toPrettyString}
            |""".stripMargin.filter(_ >=
           ' '))
 
@@ -101,6 +110,8 @@ case class ResultIterator[T: ClassTag](
       )
     } catch {
       case e: Exception => {
+        val config = SnowflakeTelemetry.getSystemConfig()
+        SnowflakeTelemetry.addTaskInfo(config)
         // Send OOB telemetry message if reading failure happens
         SnowflakeTelemetry.sendTelemetryOOB(
           sfFullURL,
@@ -111,7 +122,8 @@ case class ResultIterator[T: ClassTag](
           success = false,
           proxyInfo.isDefined,
           Some(queryID),
-          Some(e))
+          Some(e),
+          Some(config))
         // Re-throw the exception
         throw e
       }
@@ -163,6 +175,8 @@ case class ResultIterator[T: ClassTag](
       }
     } catch {
       case e: Exception => {
+        val config = SnowflakeTelemetry.getSystemConfig()
+        SnowflakeTelemetry.addTaskInfo(config)
         // Send OOB telemetry message if reading failure happens
         SnowflakeTelemetry.sendTelemetryOOB(
           sfFullURL,
@@ -173,7 +187,8 @@ case class ResultIterator[T: ClassTag](
           success = false,
           useProxy = proxyInfo.isDefined,
           queryID = Some(queryID),
-          exception = Some(e))
+          exception = Some(e),
+          Some(config))
         // Re-throw the exception
         throw e
       }

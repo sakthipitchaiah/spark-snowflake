@@ -197,6 +197,9 @@ private[io] object StageWriter {
     val prologueSql = Utils.genPrologueSql(params)
     log.debug(prologueSql.toString)
 
+    log.info(s"${SnowflakeResultSetRDD.MASTER_LOG_PREFIX} System config with " +
+      s"write: ${SnowflakeTelemetry.getSystemConfig().toPrettyString}")
+
     val conn = DefaultJDBCWrapper.getConnector(params)
 
     try {

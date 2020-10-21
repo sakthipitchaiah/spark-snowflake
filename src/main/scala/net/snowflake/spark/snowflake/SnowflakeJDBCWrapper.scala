@@ -29,7 +29,6 @@ import net.snowflake.spark.snowflake.DefaultJDBCWrapper.DataBaseOperations
 import net.snowflake.spark.snowflake.Parameters.MergedParameters
 import net.snowflake.spark.snowflake.Utils.JDBC_DRIVER
 import net.snowflake.spark.snowflake.io.SnowflakeResultSetRDD
-import org.apache.spark.sql.catalyst.expressions.Literal
 import org.apache.spark.sql.execution.datasources.jdbc.DriverRegistry
 import org.apache.spark.sql.types._
 import org.slf4j.LoggerFactory
@@ -199,9 +198,9 @@ private[snowflake] class JDBCWrapper {
            |""".stripMargin.filter(_ >= ' '))
     }
 
-    val snowflakeClientInfo = Utils.getClientInfoString()
-    log.info(snowflakeClientInfo)
-    System.setProperty("snowflake.client.info", snowflakeClientInfo)
+    // Important: Set "snowflake.client.info" is very important!
+    // For more details, refer to PROPERTY_NAME_OF_CONNECTOR_VERSION
+    System.setProperty("snowflake.client.info", Utils.getClientInfoString())
 
     val conn: Connection = DriverManager.getConnection(jdbcURL, jdbcProperties)
 
@@ -226,7 +225,10 @@ private[snowflake] class JDBCWrapper {
     }
 
     // Send client info telemetry message.
-    val extraValues = Map(TelemetryClientInfoFields.SFURL -> sfURL)
+    val extraValues = Map(
+      TelemetryClientInfoFields.SFURL -> sfURL,
+      TelemetryClientInfoFields.APPLICATION_NAME -> Utils.sparkAppName
+    )
     SnowflakeTelemetry.sendClientInfoTelemetryIfNotYet(extraValues, conn)
 
     conn
@@ -666,7 +668,6 @@ private[snowflake] object DefaultJDBCWrapper extends JDBCWrapper {
         val result: ResultSet =
           (ConstantString("desc pipe") + Identifier(name))
             .execute(bindVariableEnabled)(connection)
-//        definition = result.getString("definition")
 
         result.next()
         definition = result.getString("definition")
